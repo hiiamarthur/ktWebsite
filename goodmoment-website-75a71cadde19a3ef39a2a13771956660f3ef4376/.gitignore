@@ -1,0 +1,11 @@
+node_modules
+.idea
+.cache/*
+backend/node_modules
+mongo/data
+**/secret/*
+dist
+.DS_Store
+yarn.lock
+app/.eslintcache
+data/redis

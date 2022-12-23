@@ -1,0 +1,91 @@
+variables:
+  CONTAINER_IMAGE_APP: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHA
+  CONTAINER_IMAGE_APP_LATEST: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:latest
+  K8S_RESOURCE_NAME: $K8S_PROJECT
+
+stages:
+  - build
+#  - test
+  - deploy
+  - release
+
+.extend-deploy-config:
+  image:
+    name: alpine
+  variables:
+    K8S_PROJECT: $CI_PROJECT_NAME
+    K8S_COMMIT_REF: $CI_COMMIT_REF_SLUG
+  before_script:
+    - apk update
+.extend-build-app:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [ "" ]
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - >-
+      /kaniko/executor
+      --cache=true
+      --cache-repo=$CI_REGISTRY_IMAGE/cache
+      --context "${CI_PROJECT_DIR}/app"
+      --dockerfile "${CI_PROJECT_DIR}/app/Dockerfile"
+      --destination $CONTAINER_IMAGE_APP
+
+build image:
+  extends:
+    - .extend-build-app
+  only:
+    refs:
+      - staging
+      - production
+
+deploy non production:
+  stage: deploy
+  environment:
+    name: ${CI_COMMIT_REF_NAME}
+  only:
+    refs:
+      - staging
+  before_script:
+    - !reference [ .extend-deploy-config, before_script ]
+  script:
+    - export REDEPLOY_HASH=$CI_COMMIT_REF_NAME-$(date +%s)
+    - apk add kubectl --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing/ --allow-untrusted
+    - kubectl config set-cluster cluster --server=${K8S_ADDR}
+    - kubectl config set clusters.cluster.certificate-authority-data ${K8S_CERT}
+    - kubectl config set-credentials user --token=${K8S_TOKEN}
+    - kubectl config set-context context --user=user --cluster=cluster
+    - kubectl config use-context context
+    - apk add jq --repository=http://dl-cdn.alpinelinux.org/alpine/edge/main/
+    - apk add gettext --repository=http://dl-cdn.alpinelinux.org/alpine/edge/main/
+    - for f in k8s/${CI_COMMIT_REF_NAME}/*.yaml; do envsubst "$(env | sed -e 's/=.*//' -e 's/^/\$/g')" < $f | kubectl apply -f -; done
+
+
+deploy production:
+  extends: deploy non production
+  when: manual
+  only:
+    - production
+
+tag image non production:
+  stage: release
+  only:
+    refs:
+      - staging
+  image:
+    name: gcr.io/go-containerregistry/crane:debug
+    entrypoint: [ "" ]
+  script:
+    - crane auth login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - crane cp $CONTAINER_IMAGE_APP $CONTAINER_IMAGE_APP_LATEST
+  needs:
+    - deploy non production
+
+tag image production:
+  extends: tag image non production
+  only:
+    - production
+  needs:
+    - deploy production
